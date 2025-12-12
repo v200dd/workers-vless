@@ -4,28 +4,24 @@ import {
 
 const te = new TextEncoder();
 const td = new TextDecoder();
-const UUID = '7888888-8888-4f73-8888-f2c15d3e332c';
-const EXPECTED_UUID_BYTES = new Uint8Array(16);
-{
-	const uuidHex = UUID.replace(/-/g, '');
-	for (let i = 0; i < 16; i++) {
-		EXPECTED_UUID_BYTES[i] = parseInt(uuidHex.substring(i * 2, i * 2 + 2), 16);
-	}
+
+/**
+ * 获取请求模式的连接顺序
+ * @param {string} mode - 请求模式 ('d', 's', 'g', 'p', 'h', 'gh')
+ * @returns {string[]} - 连接尝试顺序数组
+ */
+function getOrder(mode) {
+	const orderCache = {
+		'p': ['d', 'p'],
+		's': ['d', 's'],
+		'g': ['s'],
+		'h': ['d', 'h'],
+		'gh': ['h'],
+		'default': ['d']
+	};
+	return orderCache[mode] || orderCache['default'];
 }
 
-// 在验证时直接比较
-function verifyUUID(data) {
-	if (data.byteLength < 17) return false;
-
-	const uuidBytes = new Uint8Array(data, 1, 16);  // 避免 slice 复制
-
-	for (let i = 0; i < 16; i++) {
-		if (uuidBytes[i] !== EXPECTED_UUID_BYTES[i]) {
-			return false;
-		}
-	}
-	return true;
-}
 export default {
 	async fetch(req, env) {
 
@@ -58,13 +54,13 @@ export default {
 					pParam = u.pathname.split('/p=')[1];
 					if (pParam) {
 						mode = 'p';
-					}else {
-						hParam=u.pathname.split('/h=')[1];
+					} else {
+						hParam = u.pathname.split('/h=')[1];
 						if (hParam) {
 							skJson = getSKJson(hParam);
 							mode = 'h';
-						}else{
-							hParam=u.pathname.split('/gh=')[1];
+						} else {
+							hParam = u.pathname.split('/gh=')[1];
 							if (hParam) {
 								skJson = getSKJson(hParam);
 								mode = 'gh';
@@ -109,16 +105,22 @@ export default {
 						return;
 					}
 
-					if (data.byteLength < 24) return;
+					// 最小长度检查已调整：去除了16字节UUID，最小长度变为8。
+					if (data.byteLength < 8) return;
 
-					if (!verifyUUID(data)) return;  // 验证失败直接返回
+					// !!! 已移除 UUID 验证: if (!verifyUUID(data)) return;
 
 					const view = new DataView(data);
-					const optLen = view.getUint8(17);
-					const cmd = view.getUint8(18 + optLen);
+					// 偏移量已调整: 从 17 变为 1
+					const optLen = view.getUint8(1);
+
+					// 偏移量已调整: 从 18 + optLen 变为 2 + optLen
+					const cmd = view.getUint8(2 + optLen);
 					if (cmd !== 1 && cmd !== 2) return;
 
-					let pos = 19 + optLen;
+					// 偏移量已调整: 从 19 + optLen 变为 3 + optLen
+					let pos = 3 + optLen;
+
 					const port = view.getUint16(pos);
 					const type = view.getUint8(pos + 2);
 					pos += 3;
@@ -139,6 +141,7 @@ export default {
 						addr = ipv6.join(':');
 					} else return;
 
+					// data[0] 仍然是 Type 字节
 					const header = new Uint8Array([data[0], 0]);
 					const payload = data.slice(pos);
 
@@ -177,8 +180,8 @@ export default {
 											.arrayBuffer());
 										ws.send(new Uint8Array([...(sent ? [] :
 											header), result
-												.length >> 8, result
-													.length & 0xff, ...result
+											.length >> 8, result
+											.length & 0xff, ...result
 										]));
 										sent = true;
 									}
@@ -211,7 +214,7 @@ export default {
 								});
 								await sock.opened;
 								break;
-							}else if (method === 'h' && hParam) {
+							} else if (method === 'h' && hParam) {
 								sock = await httpConnect(addr, port, skJson);
 								break;
 							}
@@ -299,6 +302,11 @@ export default {
 
 const SK_CACHE = new Map();
 
+/**
+ * 从路径中解析 SOCKS/HTTP 代理配置信息
+ * @param {string} path - 代理配置路径字符串
+ * @returns {{user: (string|null), pass: (string|null), host: string, port: number}} - 配置对象
+ */
 function getSKJson(path) {
 
 	const cached = SK_CACHE.get(path);
@@ -306,10 +314,10 @@ function getSKJson(path) {
 
 
 	// 分离认证和服务器部分
-    const hasAuth = path.includes('@');
-    const [cred, server] = hasAuth ? path.split('@') : [null, path];
+	const hasAuth = path.includes('@');
+	const [cred, server] = hasAuth ? path.split('@') : [null, path];
 	// 解析认证信息（如果存在）
-    const [user = null, pass = null] = hasAuth ? cred.split(':') : [null, null];
+	const [user = null, pass = null] = hasAuth ? cred.split(':') : [null, null];
 	const [host, port = 443] = server.split(':');
 	const result = {
 		user,
@@ -320,20 +328,6 @@ function getSKJson(path) {
 
 	SK_CACHE.set(path, result);
 	return result;
-}
-
-// 优化getOrder函数 - 使用缓存避免重复创建数组
-const orderCache = {
-	'p': ['d', 'p'],
-	's': ['d', 's'],
-	'g': ['s'],
-	'h': ['d','h'],
-	'gh': ['h'],
-	'default': ['d']
-};
-
-function getOrder(mode) {
-	return orderCache[mode] || orderCache['default'];
 }
 
 // SOCKS5连接
@@ -363,14 +357,15 @@ async function sConnect(targetHost, targetPort, skJson) {
 	return sock;
 };
 
-async function httpConnect(addressRemote, portRemote,skJson) {
+// HTTP CONNECT代理连接
+async function httpConnect(addressRemote, portRemote, skJson) {
 	const { user, pass, host, port } = skJson;
 	const sock = await connect({
 		hostname: host,
 		port: port
 	});
 
-	const connectRequest = buildConnectRequest(addressRemote, portRemote,user,pass);
+	const connectRequest = buildConnectRequest(addressRemote, portRemote, user, pass);
 	try {
 		// 发送连接请求
 		const writer = sock.writable.getWriter();
@@ -454,24 +449,24 @@ async function httpConnect(addressRemote, portRemote,skJson) {
 	return sock;
 }
 
-// 构建CONNECT请求(使用数组拼接,性能更好)
+// 构建CONNECT请求
 function buildConnectRequest(address, port, username, password) {
-    const headers = [
-        `CONNECT ${address}:${port} HTTP/1.1`,
-        `Host: ${address}:${port}`
-    ];
+	const headers = [
+		`CONNECT ${address}:${port} HTTP/1.1`,
+		`Host: ${address}:${port}`
+	];
 
-    if (username && password) {
-        const base64Auth = btoa(`${username}:${password}`);
-        headers.push(`Proxy-Authorization: Basic ${base64Auth}`);
-    }
+	if (username && password) {
+		const base64Auth = btoa(`${username}:${password}`);
+		headers.push(`Proxy-Authorization: Basic ${base64Auth}`);
+	}
 
-    headers.push(
-        'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Proxy-Connection: Keep-Alive',
-        'Connection: Keep-Alive',
-        '' // 最后的空行
-    );
+	headers.push(
+		'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+		'Proxy-Connection: Keep-Alive',
+		'Connection: Keep-Alive',
+		'' // 最后的空行
+	);
 
-    return headers.join('\r\n') + '\r\n';
+	return headers.join('\r\n') + '\r\n';
 }
